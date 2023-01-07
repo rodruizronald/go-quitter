@@ -1,69 +1,120 @@
 package quitter
 
 import (
-	"log"
-	"os"
-	"os/signal"
+	"reflect"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
 type Quitter struct {
-	quitChan      chan struct{}
-	doneChan      chan struct{}
-	childWaitDone []func(timeout time.Duration) bool
-	wg            sync.WaitGroup
-	mu            sync.Mutex
-	once          sync.Once
+	// Name of the quitter.
+	name string
+	// Quitter to listen for quit events.
+	parent *Quitter
+	// Quitters listening to this quitter.
+	childs []*Quitter
+	// List of child quitters that timeout waiting for done when parent quitter quit.
+	timeouts   []timeoutQuitter
+	timeoutsMu sync.Mutex
+	// Map of forked goroutines that are traced by this quitter.
+	grsState   map[string]routineState
+	grsStateMu sync.RWMutex
+	// Channel to signal quit event.
+	quitChan   chan struct{}
+	quitChanMu sync.Mutex
+	// Channel to signal that all forked goroutines returned.
+	doneChan     chan struct{}
+	doneChanOnce sync.Once
+	// Synchronization primitive to wait for forked goroutines to return.
+	wg sync.WaitGroup
 }
 
+type timeoutQuitter struct {
+	// Name of the quitter that timeout.
+	QuitterName string
+	// Name of the forked goroutines that failed to return.
+	// Only available when forking goroutines with the .AddGoRoutine() method.
+	GoRoutines []string
+}
+
+type ExitFuc func() (
+	// Quitter exit status, 0 (success) or 1 (failed).
+	exitStatus int,
+	// Index of the chan that triggered quit.
+	chanIndex int,
+	// Timeout information.
+	timeouts []timeoutQuitter)
+
 const (
-	parentStatusUnset int32 = iota
-	parentStatusSet
+	// Default name of the parent quitter.
+	MainQuitterName string = "main"
 )
 
 var (
 	parentStatus int32
 )
 
-func NewParentQuitter(quitTimeout time.Duration) *Quitter {
+const (
+	parentStatusUnset int32 = iota
+	parentStatusSet
+)
+
+// NewMainQuitter returns the main quitter with an exit function to call before exiting the main() routine.
+// There can be only one main quitter, the main() goroutine quitter; therefore, calling this function more
+// than once will result in a panic.
+func NewMainQuitter(quitTimeout time.Duration, chans []interface{}) (*Quitter, ExitFuc) {
+	if len(chans) == 0 {
+		panic("quitter: no chans to listen to")
+	}
+
 	parent := &Quitter{
+		name:     MainQuitterName,
+		grsState: make(map[string]routineState),
 		quitChan: make(chan struct{}),
 		doneChan: make(chan struct{}),
 	}
 
 	if !atomic.CompareAndSwapInt32(&parentStatus, parentStatusUnset, parentStatusSet) {
-		panic("quitter: set multiple parents")
+		panic("quitter: only one main quitter allowed")
 	}
 
-	signalChan := make(chan os.Signal)
-	signal.Notify(signalChan, syscall.SIGTERM)
-	signal.Notify(signalChan, syscall.SIGINT)
+	cases := make([]reflect.SelectCase, len(chans))
+	for i, ch := range chans {
+		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch)}
+	}
 
-	go func() {
-		<-signalChan
+	exit := func() (int, int, []timeoutQuitter) {
+		selectedChanIdx, _, _ := reflect.Select(cases)
+
 		parent.SendQuit()
 
-		if !parent.WaitDone(quitTimeout) {
-			log.Fatal("quitter: wait done timeout")
+		if isTimeout, timeoutInfo := parent.WaitDone(quitTimeout); isTimeout {
+			return 1, selectedChanIdx, timeoutInfo
 		}
 
-		os.Exit(0)
-	}()
+		return 0, selectedChanIdx, nil
+	}
 
-	return parent
+	return parent, exit
 }
 
-func NewChildQuitter(parent *Quitter) *Quitter {
+// NewQuitterWithName returns a quitter that listens to the parent for quit events.
+// If the parent has already quit, a nil quitter is returned instead.
+func NewQuitterWithName(parent *Quitter, name string) *Quitter {
 	child := &Quitter{
+		name:     name,
+		parent:   parent,
+		grsState: make(map[string]routineState),
 		quitChan: make(chan struct{}),
 		doneChan: make(chan struct{}),
 	}
-	parent.childWaitDone = append(parent.childWaitDone, child.WaitDone)
+	parent.childs = append(parent.childs, child)
 
-	parent.Add(1)
+	if !parent.Add(1) {
+		return nil
+	}
+
 	go func() {
 		defer parent.Done()
 		<-parent.QuitChan()
@@ -73,13 +124,15 @@ func NewChildQuitter(parent *Quitter) *Quitter {
 	return child
 }
 
+// QuitChan returns the channel to listen for quit events.
 func (q *Quitter) QuitChan() <-chan struct{} {
 	return q.quitChan
 }
 
+// HasToQuit returns an exit flag.
 func (q *Quitter) HasToQuit() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.quitChanMu.Lock()
+	defer q.quitChanMu.Unlock()
 
 	select {
 	case <-q.quitChan:
@@ -89,9 +142,10 @@ func (q *Quitter) HasToQuit() bool {
 	}
 }
 
+// SendQuit closes the quit channel to signal an exit.
 func (q *Quitter) SendQuit() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.quitChanMu.Lock()
+	defer q.quitChanMu.Unlock()
 
 	select {
 	case <-q.quitChan:
@@ -100,6 +154,7 @@ func (q *Quitter) SendQuit() {
 	}
 }
 
+// Add adds an new job to the waiting group, if the quitter hasn't quitted yet.
 func (q *Quitter) Add(delta int) bool {
 	if q.HasToQuit() {
 		return false
@@ -109,17 +164,30 @@ func (q *Quitter) Add(delta int) bool {
 	return true
 }
 
+// Done removes a job from the waiting group.
 func (q *Quitter) Done() {
 	q.wg.Done()
 }
 
-func (q *Quitter) WaitDone(timeout time.Duration) bool {
-	q.once.Do(func() {
+// WaitDone waits for all jobs added to the waiting group to be done before the given timeout.
+// It returns a flag indicating if the quitter timeout, and a slice with timeout information.
+func (q *Quitter) WaitDone(timeout time.Duration) (bool, []timeoutQuitter) {
+	waitTimeout := q.wait(timeout)
+	return waitTimeout, q.timeouts
+}
+
+func (q *Quitter) wait(timeout time.Duration) bool {
+	waitBufChan := make(chan bool, len(q.childs))
+
+	q.doneChanOnce.Do(func() {
 		go func() {
-			// Wait until all childs are done
-			for _, f := range q.childWaitDone {
-				f(timeout)
+			for _, child := range q.childs {
+				go func(cq *Quitter) {
+					waitBufChan <- cq.wait(timeout)
+				}(child)
 			}
+
+			// Wait for all goroutines to return.
 			q.wg.Wait()
 			close(q.doneChan)
 		}()
@@ -127,10 +195,37 @@ func (q *Quitter) WaitDone(timeout time.Duration) bool {
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+
+	timerFired := true
+
 	select {
 	case <-q.doneChan:
-		return false
+		// All goroutines returned.
+		timerFired = false
 	case <-timer.C:
-		return true
+		q.appendTimeouts(timeoutQuitter{
+			QuitterName: q.name,
+			GoRoutines:  q.getTimeoutGoRoutines(),
+		})
 	}
+
+	// If there are child quitters, wait for all recursive calls to .wait() to return.
+	for range q.childs {
+		if tf := <-waitBufChan; tf {
+			timerFired = tf
+		}
+	}
+
+	// Pass timeout information to parent quitter, until it reaches main quitter.
+	if q.name != MainQuitterName && len(q.timeouts) > 0 {
+		q.parent.appendTimeouts(q.timeouts...)
+	}
+
+	return timerFired
+}
+
+func (q *Quitter) appendTimeouts(ts ...timeoutQuitter) {
+	q.timeoutsMu.Lock()
+	defer q.timeoutsMu.Unlock()
+	q.timeouts = append(q.timeouts, ts...)
 }

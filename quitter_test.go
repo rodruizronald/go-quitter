@@ -6,7 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/signal"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -14,12 +18,14 @@ import (
 )
 
 const (
-	quitTimeout = time.Duration(1 * time.Second)
+	quitTimeout = time.Duration(10 * time.Millisecond)
+	doneTimeout = time.Duration(10 * time.Millisecond)
 )
 
 type QuitterSuite struct {
 	suite.Suite
-	q *Quitter
+	q    *Quitter
+	exit ExitFuc
 }
 
 func TestQuitterSuite(t *testing.T) {
@@ -27,19 +33,41 @@ func TestQuitterSuite(t *testing.T) {
 }
 
 func (s *QuitterSuite) SetupTest() {
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt)
+	errorChan := make(chan string, 1)
+	stringChan := make(chan string, 1)
+
 	parentStatus = parentStatusUnset
-	s.q = NewParentQuitter(quitTimeout)
+	chs := []interface{}{errorChan, stringChan, signalChan}
+	s.q, s.exit = NewMainQuitter(quitTimeout, chs)
 }
 
-func (s *QuitterSuite) TestMultipleParents() {
+func (s *QuitterSuite) TestMultipleMainQuitters() {
 	defer func() {
 		if r := recover(); r == nil {
 			s.T().Error("succeeded to add multiple parents")
 		}
 	}()
 
-	_ = NewParentQuitter(quitTimeout)
-	_ = NewParentQuitter(quitTimeout)
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt)
+
+	_, _ = NewMainQuitter(quitTimeout, []interface{}{signalChan})
+	_, _ = NewMainQuitter(quitTimeout, []interface{}{signalChan})
+}
+
+func (s *QuitterSuite) TestOSInterruptSignal() {
+	// Trigger termination signals
+	syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+
+	// Add one job to make exit fail
+	s.Equal(true, s.q.Add(1), "add failed before quitting")
+	exitCode, selectedChanIdx, timeoutInfo := s.exit()
+	s.Equal(1, exitCode, "succedded with quitter timeout")
+	s.Equal(2, selectedChanIdx, "unexpected channel selected")
+	s.Equal(1, len(timeoutInfo), "unexpected number of timeout quitters")
+	s.Equal(MainQuitterName, timeoutInfo[0].QuitterName, "timeout quitter name not matching expected value")
 }
 
 func (s *QuitterSuite) TestHasToQuit() {
@@ -56,8 +84,7 @@ func (s *QuitterSuite) TestAddBeforeQuit() {
 
 func (s *QuitterSuite) TestAddAfterQuit() {
 	s.q.SendQuit()
-	ok := s.q.Add(1)
-	s.Equal(false, ok, "add succeeded after quitting")
+	s.Equal(false, s.q.Add(1), "add succeeded after quitting")
 }
 
 func (s *QuitterSuite) TestDoneWithoutAdd() {
@@ -65,24 +92,29 @@ func (s *QuitterSuite) TestDoneWithoutAdd() {
 }
 
 func (s *QuitterSuite) TestTooManyDone() {
-	ok := s.q.Add(2)
-	s.Equal(true, ok, "add failed before quitting")
+	s.Equal(true, s.q.Add(2), "add failed before quitting")
 
 	s.q.Done()
 	s.q.Done()
 	s.Panics(s.q.Done, "invalid done succeeded")
 }
 
-func (s *QuitterSuite) TestWaitDoneTimeout() {
-	ok := s.q.Add(1)
-	s.Equal(true, ok, "add failed before quitting")
+func (s *QuitterSuite) TestWaitDoneTimeoutTrue() {
+	s.Equal(true, s.q.Add(1), "add failed before quitting")
 
-	s.Equal(true, s.q.WaitDone(1*time.Millisecond), "wait succeeded without done")
-	s.q.Done()
-	s.Equal(false, s.q.WaitDone(1*time.Millisecond), "wait failed with done")
+	waitTimeout, _ := s.q.WaitDone(doneTimeout)
+	s.Equal(true, waitTimeout, "wait succeeded without done")
 }
 
-func (s *QuitterSuite) TestMultipleChildsNonConcurrent() {
+func (s *QuitterSuite) TestWaitDoneTimeoutFalse() {
+	s.Equal(true, s.q.Add(1), "add failed before quitting")
+
+	s.q.Done()
+	waitTimeout, _ := s.q.WaitDone(doneTimeout)
+	s.Equal(false, waitTimeout, "wait failed with done")
+}
+
+func (s *QuitterSuite) TestNonConcurrentChildsWaitDoneTimeoutTrue() {
 	parent := s.q
 	s.Equal(true, parent.Add(3), "add failed before quitting")
 	parent.Done()
@@ -90,58 +122,104 @@ func (s *QuitterSuite) TestMultipleChildsNonConcurrent() {
 	parent.Done()
 
 	// 2 level depth
-	child1 := NewChildQuitter(parent)
+	child1 := NewQuitterWithName(parent, "child1")
 	s.Equal(true, child1.Add(1), "add failed before quitting")
 	child1.Done()
-	child1A := NewChildQuitter(child1)
+	child1A := NewQuitterWithName(child1, "child1A")
 	s.Equal(true, child1A.Add(1), "add failed before quitting")
-	child1A.Done()
-	child1B := NewChildQuitter(child1)
+	child1B := NewQuitterWithName(child1, "child1B")
 	s.Equal(true, child1B.Add(1), "add failed before quitting")
 	child1B.Done()
 
 	// 3 level depth
-	child2 := NewChildQuitter(parent)
+	child2 := NewQuitterWithName(parent, "child2")
 	s.Equal(true, child2.Add(2), "add failed before quitting")
 	child2.Done()
-	child2.Done()
-	child2A := NewChildQuitter(child2)
+	child2A := NewQuitterWithName(child2, "child2A")
 	s.Equal(true, child2A.Add(1), "add failed before quitting")
 	child2A.Done()
-	child2A1 := NewChildQuitter(child2A)
+	child2A1 := NewQuitterWithName(child2A, "child2A1")
 	s.Equal(true, child2A1.Add(1), "add failed before quitting")
 
 	// 1 level depth
-	child3 := NewChildQuitter(parent)
+	child3 := NewQuitterWithName(parent, "child3")
+	s.Equal(true, child3.Add(3), "add failed before quitting")
+	child3.Done()
+	child3.Done()
+
+	parent.SendQuit()
+	waitTimeout, timeouts := parent.WaitDone(doneTimeout)
+
+	s.Equal(true, waitTimeout, "wait succeeded without all done")
+	s.Equal(4, len(timeouts), "unexpected number of timeout quitters")
+
+	// List of quitters with goroutines that didn't return
+	qs := []string{"child1A", "child2", "child2A1", "child3"}
+	for _, ts := range timeouts {
+		s.Contains(qs, ts.QuitterName, "succeeded with timeout quitters")
+	}
+}
+
+func (s *QuitterSuite) TestNonConcurrentChildsWaitDoneTimeoutFlase() {
+	parent := s.q
+	s.Equal(true, parent.Add(3), "add failed before quitting")
+	parent.Done()
+	parent.Done()
+	parent.Done()
+
+	// 2 level depth
+	child1 := NewQuitterWithName(parent, "child1")
+	s.Equal(true, child1.Add(1), "add failed before quitting")
+	child1.Done()
+	child1A := NewQuitterWithName(child1, "child1A")
+	s.Equal(true, child1A.Add(1), "add failed before quitting")
+	child1A.Done()
+	child1B := NewQuitterWithName(child1, "child1B")
+	s.Equal(true, child1B.Add(1), "add failed before quitting")
+	child1B.Done()
+
+	// 3 level depth
+	child2 := NewQuitterWithName(parent, "child2")
+	s.Equal(true, child2.Add(2), "add failed before quitting")
+	child2.Done()
+	child2.Done()
+	child2A := NewQuitterWithName(child2, "child2A")
+	s.Equal(true, child2A.Add(1), "add failed before quitting")
+	child2A.Done()
+	child2A1 := NewQuitterWithName(child2A, "child2A1")
+	s.Equal(true, child2A1.Add(1), "add failed before quitting")
+
+	// 1 level depth
+	child3 := NewQuitterWithName(parent, "child3")
 	s.Equal(true, child3.Add(3), "add failed before quitting")
 	child3.Done()
 	child3.Done()
 	child3.Done()
 
 	parent.SendQuit()
-	s.Equal(true, parent.WaitDone(1*time.Millisecond), "wait succeeded without all done")
 	child2A1.Done()
-	s.Equal(false, parent.WaitDone(1*time.Millisecond), "wait failed with all done")
+	waitTimeout, _ := parent.WaitDone(doneTimeout)
+	s.Equal(false, waitTimeout, "wait failed with all done")
 }
 
-func (s *QuitterSuite) TestMultipleChildsConcurrent() {
+func (s *QuitterSuite) TestConcurrentChilds() {
 	parent := s.q
 	s.Equal(true, parent.Add(1), "add failed before quitting")
 
-	readyToContinue := make(chan struct{})
+	readyToContinue := make(chan struct{}, 2)
 
 	// Parent Routine
 	go func(parent *Quitter) {
 		defer parent.Done()
 
-		child1 := NewChildQuitter(parent)
+		child1 := NewQuitterWithName(parent, "child1")
 		s.Equal(true, child1.Add(1), "add failed before quitting")
 
 		// Child Routine 1
 		go func(parent *Quitter) {
 			defer parent.Done()
 
-			child1A := NewChildQuitter(parent)
+			child1A := NewQuitterWithName(parent, "child1A")
 			s.Equal(true, child1A.Add(2), "add failed before quitting")
 
 			// Child Routine 1A --> 1
@@ -154,7 +232,7 @@ func (s *QuitterSuite) TestMultipleChildsConcurrent() {
 			go func(parent *Quitter) {
 				defer parent.Done()
 
-				child1A2 := NewChildQuitter(parent)
+				child1A2 := NewQuitterWithName(parent, "child1A2")
 				s.Equal(true, child1A2.Add(2), "add failed before quitting")
 
 				// Child Routine 1A2 --> A
@@ -187,8 +265,8 @@ func (s *QuitterSuite) TestMultipleChildsConcurrent() {
 				}
 
 				child1A2.SendQuit()
-				s.Equal(false, child1A2.WaitDone(10*time.Millisecond), "wait done failed with multiple routines")
-
+				waitTimeout, _ := child1A2.WaitDone(doneTimeout)
+				s.Equal(false, waitTimeout, "wait done failed with multiple routines")
 				readyToContinue <- struct{}{}
 
 				<-parent.QuitChan()
@@ -197,14 +275,14 @@ func (s *QuitterSuite) TestMultipleChildsConcurrent() {
 			<-parent.QuitChan()
 		}(child1)
 
-		child2 := NewChildQuitter(parent)
+		child2 := NewQuitterWithName(parent, "child2")
 		s.Equal(true, child2.Add(1), "add failed before quitting")
 
 		// Child Routine 2
 		go func(parent *Quitter) {
 			defer parent.Done()
 
-			child2A := NewChildQuitter(parent)
+			child2A := NewQuitterWithName(parent, "child2A")
 			s.Equal(true, child2A.Add(2), "add failed before quitting")
 
 			// Child Routine 2A --> 1
@@ -235,8 +313,8 @@ func (s *QuitterSuite) TestMultipleChildsConcurrent() {
 			}
 
 			child2A.SendQuit()
-			s.Equal(false, child2A.WaitDone(10*time.Millisecond), "wait done failed with multiple routines")
-
+			waitTimeout, _ := child2A.WaitDone(doneTimeout)
+			s.Equal(false, waitTimeout, "wait done failed with multiple routines")
 			readyToContinue <- struct{}{}
 
 			<-parent.QuitChan()
@@ -250,7 +328,8 @@ func (s *QuitterSuite) TestMultipleChildsConcurrent() {
 	<-readyToContinue
 
 	parent.SendQuit()
-	s.Equal(false, parent.WaitDone(10*time.Millisecond), "wait done failed with multiple routines")
+	waitTimeout, _ := parent.WaitDone(doneTimeout)
+	s.Equal(false, waitTimeout, "wait done failed with multiple routines")
 }
 
 func (s *QuitterSuite) TestSpawn() {
@@ -276,8 +355,8 @@ func (s *QuitterSuite) TestSpawn() {
 			// Spawn another go routine
 			go func() {
 				defer func() {
-					parent.Done()
 					atomic.AddUint32(&ended, 1)
+					parent.Done()
 				}()
 				atomic.AddUint32(&started, 1)
 				<-parent.QuitChan()
@@ -292,39 +371,49 @@ func (s *QuitterSuite) TestSpawn() {
 	time.Sleep(10 * time.Millisecond)
 
 	s.q.SendQuit()
-	s.Equal(false, s.q.WaitDone(10*time.Millisecond), "timeout while waiting for done")
+	waitTimeout, _ := s.q.WaitDone(doneTimeout)
+	s.Equal(false, waitTimeout, "timeout while waiting for done")
+
 	startedCopy := atomic.LoadUint32(&started)
 	endedCopy := atomic.LoadUint32(&ended)
 	s.Equal(startedCopy, endedCopy, "number of started/ended go routines don't match")
 }
 
-func (s *QuitterSuite) TestAddValidRoutine() {
-	goodRoutine := func(q *Quitter) {
-		for {
-			if q.HasToQuit() {
-				break
-			}
-			time.Sleep(1 * time.Millisecond)
+func goodGoRoutine(q *Quitter) {
+	for {
+		if q.HasToQuit() {
+			break
 		}
+		time.Sleep(1 * time.Millisecond)
 	}
-
-	s.Equal(true, s.q.AddRoutine(goodRoutine), "add routine failed before quitting")
-	s.q.SendQuit()
-	s.Equal(false, s.q.WaitDone(10*time.Millisecond), "wait done failed with valid go-routine")
-	s.Equal(false, s.q.AddRoutine(goodRoutine), "add routine succeeded after quitting")
 }
 
-func (s *QuitterSuite) TestAddInvalidRoutine() {
-	badRoutine := func(q *Quitter) {
-		for {
-			time.Sleep(1 * time.Millisecond)
-		}
-	}
-
-	s.Equal(true, s.q.AddRoutine(badRoutine), "add routine failed before quitting")
+func (s *QuitterSuite) TestGoRoutineWaitDoneTimeoutFalse() {
+	s.Equal(true, s.q.AddGoRoutine(goodGoRoutine), "add routine failed before quitting")
 	s.q.SendQuit()
-	s.Equal(true, s.q.WaitDone(10*time.Millisecond), "wait done succeeded with invalid go-routines")
-	s.Equal(false, s.q.AddRoutine(badRoutine), "add routine succeeded after quitting")
+
+	waitTimeout, _ := s.q.WaitDone(doneTimeout)
+	s.Equal(false, waitTimeout, "wait done failed with valid go-routine")
+	s.Equal(false, s.q.AddGoRoutine(goodGoRoutine), "add routine succeeded after quitting")
+}
+
+func badGoRoutine(q *Quitter) {
+	for {
+		time.Sleep(1 * time.Millisecond)
+	}
+}
+
+func (s *QuitterSuite) TestGoRoutineWaitDoneTimeoutTrue() {
+	s.Equal(true, s.q.AddGoRoutine(badGoRoutine), "add routine failed before quitting")
+	s.Equal(true, s.q.AddGoRoutine(goodGoRoutine), "add routine failed before quitting")
+	s.q.SendQuit()
+
+	waitTimeout, timeouts := s.q.WaitDone(doneTimeout)
+	s.Equal(true, waitTimeout, "wait done succeeded with invalid go-routines")
+	s.Equal("main", timeouts[0].QuitterName, "badGoRoutine", "timeout with unexpected quitter")
+	s.Equal(1, len(timeouts[0].GoRoutines), "unexpected number of go-routines timeout")
+	s.Equal(true, strings.Contains(timeouts[0].GoRoutines[0], "badGoRoutine"), "timeout with unexpected go-routine")
+	s.Equal(false, s.q.AddGoRoutine(badGoRoutine), "add routine succeeded after quitting")
 }
 
 func (s *QuitterSuite) TestQuitterContext() {
@@ -355,12 +444,13 @@ func (s *QuitterSuite) TestQuitterContext() {
 		s.NoError(err)
 
 		_, err = server.Client().Do(req)
-		s.Equal(true, errors.Is(err, ErrContextQuitted), "unexpected context error received")
+		s.Equal(true, errors.Is(err, ErrQuitContext), "unexpected context error received")
 	}(s.q)
 
 	// Wait for the server to receive the request
 	<-requestReceived
 
 	s.q.SendQuit()
-	s.Equal(false, s.q.WaitDone(10*time.Millisecond), "wait done with context timeout")
+	waitTimeout, _ := s.q.WaitDone(doneTimeout)
+	s.Equal(false, waitTimeout, "wait done with context timeout")
 }
