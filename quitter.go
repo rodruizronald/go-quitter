@@ -99,31 +99,6 @@ func NewMainQuitter(quitTimeout time.Duration, chans []interface{}) (*Quitter, E
 	return parent, exit
 }
 
-// NewQuitterWithName returns a quitter that listens to the parent for quit events.
-// If the parent has already quit, a nil quitter is returned instead.
-func NewQuitterWithName(parent *Quitter, name string) *Quitter {
-	child := &Quitter{
-		name:     name,
-		parent:   parent,
-		grsState: make(map[string]routineState),
-		quitChan: make(chan struct{}),
-		doneChan: make(chan struct{}),
-	}
-	parent.childs = append(parent.childs, child)
-
-	if !parent.Add(1) {
-		return nil
-	}
-
-	go func() {
-		defer parent.Done()
-		<-parent.QuitChan()
-		child.SendQuit()
-	}()
-
-	return child
-}
-
 // QuitChan returns the channel to listen for quit events.
 func (q *Quitter) QuitChan() <-chan struct{} {
 	return q.quitChan
@@ -154,8 +129,14 @@ func (q *Quitter) SendQuit() {
 	}
 }
 
-// Add adds an new job to the waiting group, if the quitter hasn't quitted yet.
-func (q *Quitter) Add(delta int) bool {
+// WaitDone waits for all jobs added to the waiting group to be done before the given timeout.
+// It returns a flag indicating if the quitter timeout, and a slice with timeout information.
+func (q *Quitter) WaitDone(timeout time.Duration) (bool, []timeoutQuitter) {
+	waitTimeout := q.wait(timeout)
+	return waitTimeout, q.timeouts
+}
+
+func (q *Quitter) add(delta int) bool {
 	if q.HasToQuit() {
 		return false
 	}
@@ -164,16 +145,8 @@ func (q *Quitter) Add(delta int) bool {
 	return true
 }
 
-// Done removes a job from the waiting group.
-func (q *Quitter) Done() {
+func (q *Quitter) done() {
 	q.wg.Done()
-}
-
-// WaitDone waits for all jobs added to the waiting group to be done before the given timeout.
-// It returns a flag indicating if the quitter timeout, and a slice with timeout information.
-func (q *Quitter) WaitDone(timeout time.Duration) (bool, []timeoutQuitter) {
-	waitTimeout := q.wait(timeout)
-	return waitTimeout, q.timeouts
 }
 
 func (q *Quitter) wait(timeout time.Duration) bool {

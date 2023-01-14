@@ -1,11 +1,19 @@
 package quitter
 
 import (
+	"context"
 	"reflect"
 	"runtime"
 )
 
-type GoRoutine func(q *Quitter)
+type GoRoutineQuitter interface {
+	HasToQuit() bool
+	Context() context.Context
+	QuitChan() <-chan struct{}
+	AddGoRoutine(r GoRoutine) bool
+}
+
+type GoRoutine func(q GoRoutineQuitter)
 
 type routineState int
 
@@ -16,9 +24,39 @@ const (
 	routineStateNotDone
 )
 
+// NewChildQuitter returns a quitter that listens to the parent for quit events.
+// If the parent has already quit, a nil quitter is returned instead.
+func NewChildQuitter(parent GoRoutineQuitter, name string) *Quitter {
+	parentQuitter, ok := parent.(*Quitter)
+	if !ok {
+		panic("quitter: parent not quitter type")
+	}
+
+	child := &Quitter{
+		name:     name,
+		parent:   parentQuitter,
+		grsState: make(map[string]routineState),
+		quitChan: make(chan struct{}),
+		doneChan: make(chan struct{}),
+	}
+	parentQuitter.childs = append(parentQuitter.childs, child)
+
+	if !parentQuitter.add(1) {
+		return nil
+	}
+
+	go func() {
+		defer parentQuitter.done()
+		<-parentQuitter.QuitChan()
+		child.SendQuit()
+	}()
+
+	return child
+}
+
 // AddGoRoutine forks the given goroutine only if the quitter hasn't quitted yet.
 func (q *Quitter) AddGoRoutine(r GoRoutine) bool {
-	if !q.Add(1) {
+	if !q.add(1) {
 		return false
 	}
 	routineName := runtime.FuncForPC(reflect.ValueOf(r).Pointer()).Name()
@@ -27,7 +65,7 @@ func (q *Quitter) AddGoRoutine(r GoRoutine) bool {
 	go func() {
 		defer func() {
 			q.setGoRoutineState(routineName, routineStateDone)
-			q.Done()
+			q.done()
 		}()
 		r(q)
 	}()
