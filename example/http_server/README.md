@@ -1,6 +1,6 @@
 # HTTP Server Graceful Shutdown
 
-In this example you can find a dummy API service that uses the `go-quitter` to easily handle a graceful shutdown of the HTTP server on which the service is running. First, the main quitter has to be initilized in the `main()` goroutine. This is handled in the init function `initMainQuitter()`:
+In this example you can find a dummy API service that uses the `go-quitter` to easily handle a graceful shutdown of the HTTP server on which the service is running. First, the main quitter is initiated in the init function `initMainQuitter()`:
 
 ```go
 func initMainQuitter() (*quitter.Quitter, func(), []interface{}) {
@@ -53,9 +53,9 @@ The purpose of the `go-quitter` is to provide applications with a graceful shutd
 - `OS interrupt signal`
 - `Http server error`
 
-There is a single `main()` goroutine in any program. In the same case, there can only be a single main quitter; therefore, calling `quitter.NewMainQuitter()` more than once results in a panic. The exit function that `quitter.NewMainQuitter()` seats and listens for an event; if a quit event is received, the quitter proceeds to single a quit and waits until all routines have returned. Because of this, the exit function should be called either at the end of the main routine.
+There is a single `main()` goroutine in any program. In the same case, there can only be a single main quitter; therefore, calling `quitter.NewMainQuitter()` more than once results in a panic. The exit function returned by `quitter.NewMainQuitter()` listens for quit events; if an event is received, the quitter proceeds to signal a quit and waits until all routines have returned. Because of this, the exit function should be called at the end of the main routine.
 
-The logic in the main routine is clean and straightforward. First, fork two goroutines for starting and stopping the service, and then call the exit function at the end of the main routine. If `q.AddGoRoutine()` returns `false`; the quitter has already received a quit event, so the exit function is executed straightway.
+The logic in the main routine is clean and straightforward. It forks two goroutines for starting and stopping the service and then calls the exit function at the end. If `q.AddGoRoutine()` returns `false`, the quitter has already received a quit event so the exit function is executed straightway.
 
 ```go
 func main() {
@@ -76,7 +76,7 @@ func main() {
 }
 ```
 
-If the quitter receives a quit event from the channel `OS interrupt signal`, then the `srv.Start()` method would never return, and the quitter would exit with status code `1` as waiting for that method to return. Therefore, the `srv.Stop()` method runs only when the quitter signals a quit, forcing the server to close and the `srv.Start()` method to return.
+As for the service logic, it's also quite simple. There are two routines to handle the HTTP server's start/stop; the only thing to look at here is listening to the quit channel in `.Stop()`. The quit channel holds the execution of this routine until a quit event, such as `OS interrupt signal`, is received.
 
 ```go
 func (s *APIService) Start(q *quitter.Quitter) {
@@ -105,6 +105,6 @@ func (s *APIService) Stop(q *quitter.Quitter) {
 }
 ```
 
-Below you can find an diagram illustaring the goroutine and quitter relations.
+Below is a diagram illustrating the workflow between the goroutines and the main quitter. For the `go-quitter` to provide a graceful shutdown mechanism, there must be a record of the concurrent process running in a system. So the golden rule here is to always fork goroutines via a quitter, from green to blue and never from blue to blue.
 
-![alt](../../img/http_quitter_diagram.png)
+![alt](../../img/http_server.jpg)

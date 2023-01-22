@@ -23,16 +23,16 @@ const (
 )
 
 func main() {
-	q, exit, chans := initMainQuitter()
+	mainQuitter, exit, chans := initMainQuitter()
 	srv := NewService("8080", chans[ServerErrChanIdx].(chan error))
 
 	// If quitter has already quit, a new goroutine cannot be added,
-	// so .Stop() is registered first in cases .Start() cannot be added
-	if ok := q.AddGoRoutine(srv.Stop); !ok {
+	// so .Stop() is registered first in cases .Start() cannot be added.
+	if ok := mainQuitter.AddGoRoutine(srv.Stop); !ok {
 		exit()
 	}
 
-	if ok := q.AddGoRoutine(srv.Start); !ok {
+	if ok := mainQuitter.AddGoRoutine(srv.Start); !ok {
 		exit()
 	}
 
@@ -43,18 +43,18 @@ func initMainQuitter() (*quitter.Quitter, func(), []interface{}) {
 	signalChan := make(chan os.Signal, 1)
 	serverErrChan := make(chan error, 1)
 
-	// Listen for OS interrupt signals
+	// Listen for OS interrupt signals.
 	signal.Notify(signalChan, os.Interrupt)
 
-	// List of channels to listen for quit
+	// List of channels to listen for quit.
 	quitChans := []interface{}{signalChan, serverErrChan}
 
-	// For logging purpose, map of quit channels with a description
+	// For logging purpose, map of quit channels with a description.
 	chansMap := make(map[int]string, len(quitChans))
 	chansMap[InterruptChanIdx] = "OS interrupt signal"
 	chansMap[ServerErrChanIdx] = "Http server error"
 
-	// Must use main quitter in the main goroutine
+	// Must use main quitter in the main goroutine.
 	mainQuitter, exitFunc := quitter.NewMainQuitter(quitTimeout, quitChans)
 
 	exitMain := func() {
@@ -103,14 +103,14 @@ func NewService(port string, errChan chan error) *APIService {
 	}
 }
 
-func (s *APIService) Start(q *quitter.Quitter) {
+func (s *APIService) Start(parentQuitter quitter.GoRoutineQuitter) {
 	fmt.Println("Starting service")
 	s.errChan <- s.ListenAndServe()
 }
 
-func (s *APIService) Stop(q *quitter.Quitter) {
-	// Wait for quitter to quit
-	<-q.QuitChan()
+func (s *APIService) Stop(parentQuitter quitter.GoRoutineQuitter) {
+	// Wait for quitter to quit.
+	<-parentQuitter.QuitChan()
 
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
