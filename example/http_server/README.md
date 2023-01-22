@@ -107,4 +107,6 @@ func (s *APIService) Stop(q *quitter.Quitter) {
 
 Below is a diagram illustrating the workflow between the goroutines and the main quitter. For the `go-quitter` to provide a graceful shutdown mechanism, there must be a record of the concurrent process running in a system. So the golden rule here is to always fork goroutines via a quitter, from green to blue and never from blue to blue.
 
-![alt](../../img/http_server.jpg)
+<p align="center">
+  <img src="../../img/http_server.jpg"/>
+</p>

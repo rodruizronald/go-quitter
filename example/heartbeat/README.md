@@ -118,4 +118,6 @@ func (hb *HeartBeat) RunChild(parentQuitter quitter.GoRoutineQuitter) {
 
 Below is a diagram illustrating the workflow between the goroutines and quitters. For the `go-quitter` to provide a graceful shutdown mechanism, there must be a record of the concurrent process running in a system. So the golden rule here is to always fork goroutines via a quitter, from green to blue and never from blue to blue.
 
-![alt](../../img/child_quitter.jpg)
+<p align="center">
+  <img src="../../img/child_quitter.jpg"/>
+</p>
