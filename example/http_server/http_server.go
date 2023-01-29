@@ -28,11 +28,11 @@ func main() {
 
 	// If quitter has already quit, a new goroutine cannot be added,
 	// so .Stop() is registered first in cases .Start() cannot be added.
-	if ok := mainQuitter.AddGoRoutine(srv.Stop); !ok {
+	if !mainQuitter.AddGoRoutine(srv.Stop) {
 		exit()
 	}
 
-	if ok := mainQuitter.AddGoRoutine(srv.Start); !ok {
+	if !mainQuitter.AddGoRoutine(srv.Start) {
 		exit()
 	}
 

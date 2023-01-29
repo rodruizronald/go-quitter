@@ -22,7 +22,7 @@ func main() {
 
 	// If false, quitter has already quitted.
 	hb := HeartBeat{name: "main_heartbeat"}
-	if ok := mainQuitter.AddGoRoutine(hb.RunMain); !ok {
+	if !mainQuitter.AddGoRoutine(hb.RunMain) {
 		exit()
 	}
 
@@ -86,11 +86,11 @@ func (hb *HeartBeat) RunMain(parentQuitter quitter.GoRoutineQuitter) {
 	// Fork two childs heartbeats on the child quitter.
 	// If false, quitter has already quitted.
 	childA := HeartBeat{name: "child_heartbeat_a"}
-	if ok := childQuitter.AddGoRoutine(childA.RunChild); !ok {
+	if !childQuitter.AddGoRoutine(childA.RunChild) {
 		return
 	}
 	childB := HeartBeat{name: "child_heartbeat_b"}
-	if ok := childQuitter.AddGoRoutine(childB.RunChild); !ok {
+	if !childQuitter.AddGoRoutine(childB.RunChild) {
 		return
 	}
 
