@@ -6,15 +6,15 @@ This example uses the `go-quitter` in a simple heartbeat application with a main
 func initMainQuitter() (*quitter.Quitter, func()) {
 	signalChan := make(chan os.Signal, 1)
 
-	// Listen for OS interrupt signals.
-	signal.Notify(signalChan, os.Interrupt)
+	// Listen for OS interrupt and termination signals.
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
 	// List of channels to listen for quit.
 	quitChans := []interface{}{signalChan}
 
 	// For logging purpose, map of quit channels with a description.
 	chansMap := make(map[int]string, len(quitChans))
-	chansMap[InterruptChanIdx] = "OS interrupt signal"
+	chansMap[InterruptChanIdx] = "OS interrupt/termination signal"
 
 	// Must use main quitter in the main goroutine.
 	mainQuitter, exitFunc := quitter.NewMainQuitter(quitTimeout, quitChans)
@@ -48,7 +48,7 @@ func initMainQuitter() (*quitter.Quitter, func()) {
 
 The purpose of the `go-quitter` is to provide applications with a graceful shutdown mechanism. A set of predefined user events that the main quitter listens to can signal a quit, and as a result, all forked goroutines have to return. Golang channels define the events a main quitter listens to for a quit; there must be at least one channel pass to the main quitter. There is a maximum time the main quitter waits for all forked goroutines to return; the quit timeout parameter determines this. In the init function there is only one event to listen for a quit: 
 
-- `OS interrupt signal`
+- `OS interrupt/termination signal`
 
 There is a single `main()` goroutine in any program. In the same case, there can only be a single main quitter; therefore, calling `quitter.NewMainQuitter()` more than once results in a panic. The exit function returned by `quitter.NewMainQuitter()` listens for quit events; if an event is received, the quitter proceeds to signal a quit and waits until all routines have returned. Because of this, the exit function should be called at the end of the main routine.
 
@@ -57,14 +57,13 @@ The logic in the main routine is quite simple. It forks a goroutine to run the m
 ```go
 func main() {
 	mainQuitter, exit := initMainQuitter()
+	defer exit()
 
 	// If false, quitter has already quitted.
 	hb := HeartBeat{name: "main_heartbeat"}
-	if ok := mainQuitter.AddGoRoutine(hb.RunMain); !ok {
-		exit()
+	if !mainQuitter.AddGoRoutine(hb.RunMain) {
+		return
 	}
-
-	exit()
 }
 ```
 

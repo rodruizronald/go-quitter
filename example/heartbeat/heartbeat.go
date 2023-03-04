@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/rodruizronald/go-quitter"
@@ -19,28 +20,27 @@ const (
 
 func main() {
 	mainQuitter, exit := initMainQuitter()
+	defer exit()
 
 	// If false, quitter has already quitted.
 	hb := HeartBeat{name: "main_heartbeat"}
 	if !mainQuitter.AddGoRoutine(hb.RunMain) {
-		exit()
+		return
 	}
-
-	exit()
 }
 
 func initMainQuitter() (*quitter.Quitter, func()) {
 	signalChan := make(chan os.Signal, 1)
 
-	// Listen for OS interrupt signals.
-	signal.Notify(signalChan, os.Interrupt)
+	// Listen for OS interrupt and termination signals.
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
 	// List of channels to listen for quit.
 	quitChans := []interface{}{signalChan}
 
 	// For logging purpose, map of quit channels with a description.
 	chansMap := make(map[int]string, len(quitChans))
-	chansMap[InterruptChanIdx] = "OS interrupt signal"
+	chansMap[InterruptChanIdx] = "OS interrupt/termination signal"
 
 	// Must use main quitter in the main goroutine.
 	mainQuitter, exitFunc := quitter.NewMainQuitter(quitTimeout, quitChans)

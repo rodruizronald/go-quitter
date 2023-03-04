@@ -7,18 +7,18 @@ func initMainQuitter() (*quitter.Quitter, func(), []interface{}) {
 	signalChan := make(chan os.Signal, 1)
 	serverErrChan := make(chan error, 1)
 
-	// Listen for OS interrupt signals
-	signal.Notify(signalChan, os.Interrupt)
+	// Listen for OS interrupt and termination signals.
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 
-	// List of channels to listen for quit
+	// List of channels to listen for quit.
 	quitChans := []interface{}{signalChan, serverErrChan}
 
-	// For logging purpose, map of quit channels with a description
+	// For logging purpose, map of quit channels with a description.
 	chansMap := make(map[int]string, len(quitChans))
-	chansMap[InterruptChanIdx] = "OS interrupt signal"
+	chansMap[InterruptChanIdx] = "OS interrupt/termination signal"
 	chansMap[ServerErrChanIdx] = "Http server error"
 
-	// Must use main quitter in the main goroutine
+	// Must use main quitter in the main goroutine.
 	mainQuitter, exitFunc := quitter.NewMainQuitter(quitTimeout, quitChans)
 
 	exitMain := func() {
@@ -50,7 +50,7 @@ func initMainQuitter() (*quitter.Quitter, func(), []interface{}) {
 
 The purpose of the `go-quitter` is to provide applications with a graceful shutdown mechanism. A set of predefined user events that the main quitter listens to can signal a quit, and as a result, all forked goroutines have to return. Golang channels define the events a main quitter listens to for a quit; there must be at least one channel pass to the main quitter. There is a maximum time the main quitter waits for all forked goroutines to return; the quit timeout parameter determines this. In the init function there are two events to listen for a quit: 
 
-- `OS interrupt signal`
+- `OS interrupt/termination signal`
 - `Http server error`
 
 There is a single `main()` goroutine in any program. In the same case, there can only be a single main quitter; therefore, calling `quitter.NewMainQuitter()` more than once results in a panic. The exit function returned by `quitter.NewMainQuitter()` listens for quit events; if an event is received, the quitter proceeds to signal a quit and waits until all routines have returned. Because of this, the exit function should be called at the end of the main routine.
@@ -59,24 +59,24 @@ The logic in the main routine is clean and straightforward. It forks two gorouti
 
 ```go
 func main() {
-	q, exit, chans := initMainQuitter()
-	srv := NewService("8080", chans[ServerErrChanIdx].(chan error))
+	mainQuitter, exit, chans := initMainQuitter()
+	defer exit()
+
+	srv := NewService("8080", chans, mainQuitter.Context())
 
 	// If quitter has already quit, a new goroutine cannot be added,
-	// so .Stop() is registered first in cases .Start() cannot be added
-	if ok := q.AddGoRoutine(srv.Stop); !ok {
-		exit()
+	// so .Stop() is registered first in cases .Start() cannot be added.
+	if !mainQuitter.AddGoRoutine(srv.Stop) {
+		return
 	}
 
-	if ok := q.AddGoRoutine(srv.Start); !ok {
-		exit()
+	if !mainQuitter.AddGoRoutine(srv.Start) {
+		return
 	}
-
-	exit()
 }
 ```
 
-As for the service logic, it's also quite simple. There are two routines to handle the HTTP server's start/stop; the only thing to look at here is listening to the quit channel in `.Stop()`. The quit channel holds the execution of this routine until a quit event, such as `OS interrupt signal`, is received.
+As for the service logic, it's also quite simple. There are two routines to handle the HTTP server's start/stop; the only thing to look at here is listening to the quit channel in `.Stop()`. The quit channel holds the execution of this routine until a quit event, such as `OS interrupt/termination signal`, is received.
 
 ```go
 func (s *APIService) Start(q *quitter.Quitter) {
