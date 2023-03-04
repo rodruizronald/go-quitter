@@ -68,15 +68,15 @@ func NewMainQuitter(quitTimeout time.Duration, chans []interface{}) (*Quitter, E
 		panic("quitter: no chans to listen to")
 	}
 
+	if !atomic.CompareAndSwapInt32(&parentStatus, parentStatusUnset, parentStatusSet) {
+		panic("quitter: only one main quitter allowed")
+	}
+
 	parent := &Quitter{
 		name:     MainQuitterName,
 		grsState: make(map[string]routineState),
 		quitChan: make(chan struct{}),
 		doneChan: make(chan struct{}),
-	}
-
-	if !atomic.CompareAndSwapInt32(&parentStatus, parentStatusUnset, parentStatusSet) {
-		panic("quitter: only one main quitter allowed")
 	}
 
 	cases := make([]reflect.SelectCase, len(chans))
