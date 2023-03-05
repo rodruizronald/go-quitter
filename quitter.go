@@ -133,7 +133,9 @@ func (q *Quitter) SendQuit() {
 // It returns a flag indicating if the quitter timeout, and a slice with timeout information.
 func (q *Quitter) WaitDone(timeout time.Duration) (bool, []timeoutQuitter) {
 	waitTimeout := q.wait(timeout)
-	return waitTimeout, q.timeouts
+	tmp := q.timeouts
+	q.timeouts = nil // clean it for future calls
+	return waitTimeout, tmp
 }
 
 func (q *Quitter) add(delta int) bool {

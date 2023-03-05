@@ -6,9 +6,9 @@ Working with multi-threaded applications can be challenging, especially when it 
 
 For example, let's consider a Go program that forks 20 goroutines from the main routine, and each of them creates another 20 goroutines, and so on. With so many goroutines running in the background, it becomes crucial to implement a reliable mechanism for shutting down the program gracefully. When the main routine receives a termination signal, it needs to inform all the goroutines running in the background to exit gracefully. This can be achieved using channels and signals, which are core features of the Go programming language.
 
-This post introduces [go-quitter](https://github.com/rodruizronald/go-quitter), a tool designed to send a quit signal to goroutines, allowing them to perform necessary cleanup tasks and save their states. When using go-quitter, the program will wait for a set amount of time before exiting, ensuring that all necessary tasks are completed while avoiding indefinite locks. Additionally, go-quitter can identify routines that fail to return. This feature is particularly useful for debugging and identifying potential issues in the code.
+This post introduces the [go-quitter](https://github.com/rodruizronald/go-quitter), a tool designed to send a quit signal to goroutines, allowing them to perform necessary cleanup tasks and save their states. When using go-quitter, the program will wait for a set amount of time before exiting, ensuring that all necessary tasks are completed while avoiding indefinite locks. Additionally, go-quitter can identify routines that fail to return. This feature is particularly useful for debugging and identifying potential issues in the code.
 
-Overall, go-quitter is a useful solution for managing background processes in Go programs and ensuring they gracefully exit when necessary.
+Overall, the go-quitter is a useful solution for managing background processes in Go programs and ensuring they gracefully exit when necessary.
 
 Before jumping into the go-quitter, we will cover some of the synchronization primitives that the Golang library provides, such as channels, signals, waiting groups, and error groups, to understand better how these are used when building a graceful shutdown mechanism. A good understating of them is also relevant since the go-quitter is built on top of them.
 
@@ -51,7 +51,7 @@ go fun() {
 
 By using channels and signals together in this way, you can implement a robust and reliable graceful shutdown mechanism for your concurrent program, ensuring that all goroutines are terminated cleanly and all resources are properly released.
 
-## WaitGroup and ErrorGroup
+## WaitGroup
 
 The `sync.WaitGroup` package is used to synchronize goroutines in Go. It is useful in cases where a program needs to wait for a group of goroutines to complete before continuing. In the context of graceful shutdown, it can be used to wait for all active goroutines to complete before shutting down the application.
 
@@ -96,6 +96,8 @@ func main() {
 ```
 
 In the above code, we create a `WaitGroup` and `quitChan` channel. We then spawn five goroutines that perform some work inside an infinite loop. The loop continues until the `quitChan` channel is closed. Once the `quitChan` channel is closed, the goroutines exit and the `WaitGroup` is notified with each call to `wg.Done()`. Finally, we wait for all the goroutines to complete by calling `wg.Wait()`.
+
+## ErrorGroup
 
 The `errgroup.Group` package is used to handle errors in a group of goroutines. It is similar to `WaitGroup`, but it also handles errors that occur in any of the goroutines. In the context of graceful shutdown, it can be used to wait for all active goroutines to complete, while also handling any errors that occur in those goroutines.
 
@@ -307,9 +309,13 @@ func initMainQuitter() (*quitter.Quitter, func(), []interface{}) {
 }
 ```
 
-## Go Quitter vs ErrGroup
+## Go Quitter vs ErrorGroup
 
+When comparing the `errgroup` and `go-quitter` solutions objectively in terms of functionality, I believe that the `errgroup` package, when combined with other Go packages, is sufficient to create a graceful shutdown for your application. Therefore, there may be no need to add external dependencies. However, both `errgroup` and `go-quitter` have their unique features, and the choice ultimately depends on your requirements.
 
+One advantage of using `go-quitter` is that it does not involve any locks when quitting due to the presence of a quit timeout. In case of a timeout while quitting, the `go-quitter` package provides additional information indicating the goroutines that failed to return. This information can be useful for debugging purposes. Additionally, `go-quitter` supports nested quitters called child quitters that do not listen to channels but rather to a parent quitter. Although this post did not cover these features, you can explore them by referring to this [example](https://github.com/rodruizronald/go-quitter/tree/main/example/heartbeat).
+
+On the other hand, `errgroup` provides some convenient functionality, such as setting limits on the number of active goroutines per group, which can help prevent excessive use of memory.
 
 
 
