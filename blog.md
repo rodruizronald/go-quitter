@@ -1,4 +1,10 @@
-# Exit Go routines properly with Go Quitter
+---
+title: Exit Go routines properly with Go Quitter
+domain: rodruizronald.hashnode.dev
+tags: golang, channels, signals, waitgroup, errgroup, mutex, graceful, shutdown, sync
+slug: go-quitter
+cover: https://cdn.hashnode.com/res/hashnode/image/upload/v1678002901631/aw67ifzxt.jpg?auto=compress
+---
 
 Golang is a langue known for its simplicity, performance, and concurrency model. Goroutines are one of the most basic units to organize a Go program. A goroutine is a lightweight execution thread that executes concurrently, but not necessarily in parallel, with the rest of the program.
 
@@ -316,6 +322,3 @@ When comparing the `errgroup` and `go-quitter` solutions objectively in terms of
 One advantage of using `go-quitter` is that it does not involve any locks when quitting due to the presence of a quit timeout. In case of a timeout while quitting, the `go-quitter` package provides additional information indicating the goroutines that failed to return. This information can be useful for debugging purposes. Additionally, `go-quitter` supports nested quitters called child quitters that do not listen to channels but rather to a parent quitter. Although this post did not cover these features, you can explore them by referring to this [example](https://github.com/rodruizronald/go-quitter/tree/main/example/heartbeat).
 
 On the other hand, `errgroup` provides some convenient functionality, such as setting limits on the number of active goroutines per group, which can help prevent excessive use of memory.
-
-
-
